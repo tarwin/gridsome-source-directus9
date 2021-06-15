@@ -1,5 +1,6 @@
 # gridsome-source-directus9
 
+Based on https://github.com/avatarbabe/gridsome-source-directus9, updated to work differently with images
 Based on https://github.com/peXed/gridsome-source-directus, updated to support Directus 9
 
 ### Basic usage:
@@ -20,31 +21,14 @@ module.exports = {
     {
       use: "gridsome-source-directus9",
       options: {
-        apiUrl: "",
-        project: "Directus", //name of project in directus
-        email: "", //email for login to directus
-        password: "", //password for login to directus
-        collections: [ //example collections, read more about the options here: https://github.com/peXed/gridsome-source-directus
+        ...
+        collections: [
           {
             name: "articles",
-            status: "published",
-            fields: "*.*",
-            downloadImages: true,
-            hasRoute: true
+            fields: "*",
+            downloadImages: true
           },
-          {
-            name: "projects",
-            status: "published",
-            fields: "*.*",
-            downloadImages: true,
-          },
-          {
-            name: "pages",
-            status: "published",
-            fields: "*.*.*",
-            downloadImages: true,
-            hasRoute: true
-          }
+          ...
         ],
       },
     },

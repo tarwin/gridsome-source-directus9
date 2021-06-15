@@ -1,15 +1,24 @@
+// CONFIG
+
+// directory to add images to
+// here we are putting them in static, rather than assets
+let uploadImagesDir = './static/assets/cms_images'
+
+// a directus user token that has access to reading assets
+const userToken = ''
+
 const DirectusSDK = require('@directus/sdk-js');
 const fs = require('fs');
 const path = require('path');
+const fetch = require('node-fetch')
+const {pipeline} = require('stream')
+const {promisify} = require('util')
 
 /**
  * Convert `const http` to variable to change protocol from project options
  */
-let http = require('https');
-/**
- * Default upload image path
- */
-let uploadImagesDir = './.cache-directus/img-cache'
+// let http = require('https');
+const { COPYFILE_FICLONE_FORCE } = require('constants');
 
 const imageTypes = [
   'image/jpeg',
@@ -19,37 +28,28 @@ const imageTypes = [
 ]
 
 // TODO ADD CLEANUP OF UNUSED IMAGES / FILES
-let download = async (url, dest, dir = uploadImagesDir) => {
+let download = async (url, imgName) => {
 
-  var imgName = dest;
+  const dest = uploadImagesDir + '/' + imgName
 
-  if (!fs.existsSync('./.cache-directus')) {
-    fs.mkdirSync('./.cache-directus');
-  }
-
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir);
-  }
-
-  dest = dir + '/' + dest;
-
-  var cleanImageName = path.resolve(dest);
-
-  if (fs.existsSync(dest)) return cleanImageName;
+  if (fs.existsSync(dest)) return imgName;
 
   console.log(' -- Downloading Resource: ' + imgName);
 
-  return new Promise((resolve, reject) => {
-    var file = fs.createWriteStream(dest);
-    http.get(url, function (response) {
-      response.pipe(file);
-      file.on('finish', function () {
-        resolve(cleanImageName);
-      });
-    }).on('error', function (err) {
-      fs.unlink(dest);
-      reject(err.message);
-    });
+  return new Promise(async (resolve, reject) => {
+    try {
+      const streamPipeline = promisify(pipeline)
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer: ${userToken}`
+        }
+      })
+      if (!response.ok) throw new Error(`unexpected response ${response.statusText}`)
+      await streamPipeline(response.body, fs.createWriteStream(dest))
+      resolve(imgName)
+    } catch (e) {
+      reject(e.message)
+    }
   });
 };
 
@@ -106,13 +106,26 @@ function flatten(obj) {
  * End. https://stackoverflow.com/questions/34513964/how-to-convert-this-nested-object-into-a-flat-object
  * */
 
-async function checkForImages(item, apiUrl) {
-
+async function checkForImages(item, apiUrl, metas, filenameLookup) {
   for (const itemKey in item) {
     const itemContent = item[itemKey];
-    if (itemContent && itemContent.type && imageTypes.includes(itemContent.type)) {
-      console.log("downloading image", apiUrl + 'assets/' + itemContent.filename_download);
-      item[itemKey].gridsome_image = await download(apiUrl + 'assets/' + itemContent.filename_download, itemContent.filename_disk);
+    const isFileImage = metas && metas[itemKey] && metas[itemKey].meta && metas[itemKey].meta.interface === 'file-image'
+    const isMarkdown = metas && metas[itemKey] && metas[itemKey].meta && metas[itemKey].meta.interface === 'input-rich-text-md'
+    if (itemContent && isFileImage) {
+      // console.log("downloading image", apiUrl + 'assets/' + itemContent);
+      item[itemKey] = await download(apiUrl + '/assets/' + itemContent, filenameLookup[itemContent]);
+    } else if (itemContent && isMarkdown) {
+      const matches = itemContent.matchAll(/!\[([^\]]*)\]\(([^\)]*)\)/g)
+      for (const match of matches) {
+        // 0: full string, 1: alt text, 2: url
+        const urlMatch = match[2].match(/\/assets\/([^\/]+)/)
+        const fileKey = urlMatch && urlMatch[1]
+        const fileName = fileKey && filenameLookup[fileKey]
+        if (fileName) {
+          await download(apiUrl + '/assets/' + fileKey, fileName)
+          item[itemKey] = item[itemKey].replace(match[2], `/assets/cms_images/${fileName}`)
+        }
+      }
     } else if (itemContent && itemKey !== 'owner' && typeof itemContent === 'object' && Object.keys(itemContent).length > 0) {
       item[itemKey] = await checkForImages(itemContent, apiUrl);
     }
@@ -189,7 +202,7 @@ class DirectusSource {
           await client.auth.login(Object.assign({ email, password }));
           resolve(await client.collections.read());
         } catch (e) {
-          console.error("DIRECTUS ERROR: Can not login to Directus", e);
+          console.error("DIRECTUS ERROR: Can not login to Directus", e.message);
 
           if (retries < maxRetries) {
             retries++;
@@ -215,8 +228,25 @@ class DirectusSource {
     if (collections.length <= 0) {
       console.error("DIRECTUS ERROR: No Directus collections specified!");
       process.exit(1)
-      throw new Error("DIRECTUS ERROR: No Directus collections specified!");
     }
+
+    // get a list of all files for later download use
+    const files = (await client.files.read()).data
+    const filenameLookup = {}
+    files.forEach(f => {
+      filenameLookup[f.id] = f.filename_disk
+    })
+
+    // first get all collection metadata
+    const fields = (await client.fields.read()).data
+    const fieldLookup = {}
+    fields
+      .forEach(f => {
+        if (!fieldLookup[f.collection]) {
+          fieldLookup[f.collection] = {}
+        }
+        fieldLookup[f.collection][f.field] = f
+      })
 
     for (const collection of collections) {
       let collectionName;
@@ -261,7 +291,7 @@ class DirectusSource {
         for (let item of data) {
 
           if (params.downloadImages) {
-            item = await checkForImages(item, apiUrl);
+            item = await checkForImages(item, apiUrl, fieldLookup[collectionName], filenameLookup);
           }
 
           if (params.downloadFiles) {
